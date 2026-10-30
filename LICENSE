@@ -21,14 +21,3 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
----
-
-本项目复用了 DSH-to-Figma（https://github.com/Duoasa/DSH-to-Figma，MIT）的
-桥接协议实现（lib/bridge.mjs）、工具目录（lib/catalog.mjs）、素材处理
-（lib/assets.mjs）以及 Figma 伴生插件资源（companion/）。上述部分的著作权归
-Duoasa 所有，按原 MIT 许可使用。
-
-This project reuses the bridge protocol (lib/bridge.mjs), tool catalog
-(lib/catalog.mjs), asset handling (lib/assets.mjs) and the Figma companion
-plugin assets (companion/) from DSH-to-Figma, Copyright (c) 2026 Duoasa,
-licensed under MIT.

@@ -253,19 +253,6 @@ workbuddy-figma/
 
 ---
 
-## 与上游的关系
-
-本项目基于 [DSH-to-Figma](https://github.com/Duoasa/DSH-to-Figma)（MIT，© 2026 Duoasa）。
-
-复用了它的桥接协议、工具定义、素材处理和 Figma 伴生插件资源；
-自己重写的是 MCP 服务端层（上游绑定了 DeepSeek Harness 的插件运行时，无法直接用于
-WorkBuddy）、一键安装、端到端自检，以及针对 WorkBuddy 的适配。
-
-上游项目的版权声明保留在 [LICENSE](LICENSE) 里。
-
----
-
 ## License
 
 [MIT](LICENSE) © 2026 jayk067123-max
-基于 [DSH-to-Figma](https://github.com/Duoasa/DSH-to-Figma) © 2026 Duoasa（MIT）

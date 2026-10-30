@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * figma-bridge —— 把 GitHub 项目 Duoasa/DSH-to-Figma 的本地桥接层
+ * figma-bridge —— 把本地桥接层
  * 包成一个标准 MCP server，供 WorkBuddy 直接使用。
  *
  * 链路：
