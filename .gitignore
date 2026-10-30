@@ -1,0 +1,19 @@
+# 依赖
+node_modules/
+
+# 测试与调试产物
+selftest.out
+selftest.err
+*.log
+.figma/
+
+# 编辑器 / 系统
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# 本机配对凭证绝不能提交
+companion/README.txt
+token
+*paired*
