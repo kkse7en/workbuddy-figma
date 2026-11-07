@@ -33,14 +33,15 @@ Figma 的**官方 MCP**（`mcp.figma.com`）走 Dev Mode，免费账号进不去
 ```mermaid
 graph LR
   A["WorkBuddy<br/>（MCP 客户端）"] -->|"JSON-RPC / stdio"| B["server.mjs<br/>本地 MCP 服务"]
-  B -->|"HTTP 长轮询<br/>127.0.0.1:3055"| C["Figma 伴生插件<br/>（跑在你的文件里）"]
+  B -->|"HTTP 长轮询<br/>localhost:3055 起"| C["Figma 伴生插件<br/>（跑在你的文件里）"]
   C -->|"Figma Plugin API"| D[("你的 Figma 文档")]
 ```
 
 三句话：
 
 1. WorkBuddy 启动时拉起 `server.mjs`，它是一个标准 MCP server，对外暴露 21 个工具。
-2. `server.mjs` 在 `127.0.0.1:3055` 上开一个小 HTTP 服务，等 Figma 插件来连（3055 被占用会自动顺延，端口一致地写进插件里）。
+2. `server.mjs` 在本机开一个小 HTTP 服务，等 Figma 插件来连。默认从 3055 起，**被占用就自动往后顺延**
+   （最多 10 个端口），真实端口会同步写进插件里，不需要你手动对齐。
 3. 你在 Figma 里运行一次插件，两边用一对本机随机 token 配对，之后就一直通着。
 
 配对 token 是安装时现场生成的 32 字节随机数，只存在你本机，`install.mjs` 会把它注入到
@@ -77,7 +78,7 @@ node install.mjs
 node install.mjs --dry-run
 ```
 
-换端口（默认 3055）：
+换起始端口（默认从 3055 开始找空闲的）：
 
 ```bash
 node install.mjs --port 3060
@@ -90,7 +91,24 @@ node install.mjs --port 3060
 **第二步 · 信任 MCP。** 打开连接器管理，找到 `figma`，点「信任」。
 自定义 MCP 必须手动授权，这是 WorkBuddy 的安全设计，脚本改不了。
 
-**第三步 · 导入 Figma 插件。** 在 Figma 桌面端：
+**第三步 · 让 Figma 认这个插件。** 两条路，推荐第一条：
+
+**① 直接注册（推荐，跳过导入对话框）**
+
+完整退出 Figma（含托盘图标），然后：
+
+```bash
+node install.mjs --register
+```
+
+它会把这个插件直接写进 Figma 的插件列表。重新打开 Figma，
+`Plugins → Development` 里就会出现 `workbuddy-figma`，不用再选文件。
+
+> 为什么推荐这条：Figma 的「Import plugin from manifest」对话框在部分环境下会对
+> 本地路径报一句 `manifest.json 文件名无效`，但不说哪里无效。实测同样的 manifest
+> 换个目录就能导入，是对话框自身的问题。直接写注册表可以完全绕开。
+
+**② 手动导入**
 
 ```
 Plugins → Development → Import plugin from manifest…
@@ -99,11 +117,14 @@ Plugins → Development → Import plugin from manifest…
 选 `install.mjs` 打印的那个 `manifest.json`，通常在：
 
 ```
-~/.workbuddy/workbuddy-figma/companion/manifest.json
+~/Documents/workbuddy-figma-plugin/manifest.json
 ```
 
 然后在**目标设计文件**里运行 `Plugins → Development → workbuddy-figma`。
 会弹出一个窄条小窗口，**留着别关** —— 它一关，连接就断。
+
+> 插件放在 `~/Documents` 而不是 `~/.workbuddy`：后者是隐藏目录，
+> Figma 的文件选择器里不好找，部分版本还会挑路径。
 
 ### 验证
 
@@ -174,7 +195,7 @@ node selftest.mjs
 
 ## 连接稳定性
 
-长轮询桥最怕的不是慢，是「看起来连上了但下一次就没反应」。v1.1 修掉了五个会真实造成这种症状的点：
+长轮询桥最怕的不是慢，是「看起来连上了但下一次就没反应」。下面这些点都会真实造成这种症状，已逐个修掉。
 
 | 症状 | 原因 | 处理 |
 |---|---|---|
@@ -182,7 +203,10 @@ node selftest.mjs
 | 一次网络抖动就永久卡住 | 旧 poll 未回收时新 poll 直接返回 409，插件端断不开 | 新 poll 接管旧 poll（旧的以 `idle` 结束），不再 409 |
 | 操作成功却被判「结果未知」 | 结果回传请求本身超时，重试被当成重复操作 | `/result` 幂等，重复回传返回 `accepted` |
 | 同一个文件重开插件后一直超时 | 僵尸连接留在列表里，工具挑到了那条等不到响应的 | 新连接清掉同 `fileKey` 且在 30s 内无活动的旧连接 |
-| 跑过一次自检后插件突然 401 | 自检和日常共用状态目录，把插件的端口/token 覆写了 | 自检改用独立状态目录（`WORKBUDDY_FIGMA_STATE` 可覆盖） |
+| 跑过一次自检后插件突然 401 | 自检和日常共用状态目录，把插件的端口/token 覆写了 | 自检改用独立状态目录 + 独立插件目录 |
+| **「一直连接中」/「配对已失效」，但桥明明在跑** | 桥只绑 `127.0.0.1`，而 Figma 里的 fetch 走 `localhost`，Windows 会优先解析到 `::1` —— 请求落到了同端口上**另一个** Figma 桥（旧版 DSH / Codex 之类），token 自然对不上 | 桥改**双栈监听**（`::`，`ipv6Only: false`），Host 校验同时接受 `[::1]` |
+| **桥整个没起来，工具一直报连不上** | 早期版本设了 `FIGMA_BRIDGE_PORT` 就只试那一个端口，被占就彻底放弃 | 任何时候都允许顺延 10 个端口，真实端口自动写回插件 |
+| **重装后端口莫名跳到下一个** | 安装脚本靠 401 文案判断「是不是自己的桥」，但别的 Figma 桥文案一模一样，被误认为可复用 | 桥加 `x-workbuddy-figma` 响应头，按响应头识别身份 |
 
 另外客户端退避改成了 300ms 起、最多 5s（原来 1s→10s，抖动一次像断了半分钟），
 401 会先用当前密钥自动复验一次再报「配对失效」，
@@ -198,25 +222,66 @@ node selftest.mjs
 
 1. **插件是不是旧目录那条？** `Plugins → Development` 里如果出现 `[DEPRECATED]` 前缀的条目，
    那是历史残留，token 对不上，点了也连不上。用不带前缀的 `workbuddy-figma`。
-2. **端口对不对**：插件的端口是安装时写死的。跑一下 `node install.mjs` 重新生成，
-   再重新导入一次，保证插件和桥指向同一个端口。
-3. **桥在不在跑**：WorkBuddy 重启后才会拉起 `server.mjs`。
+2. **桥在不在跑**：WorkBuddy 重启后才会拉起 `server.mjs`。
+   在终端里确认一下（有 `x-workbuddy-figma: 1` 这个响应头才是我们的桥）：
+
+   ```bash
+   curl -i http://localhost:3060/health
+   ```
+
+   返回 401 + `x-workbuddy-figma: 1` 是正常的（401 只表示没带 token）。
+   如果连不上、或者**没有这个响应头**，说明端口上蹲着别人的服务。
+3. **端口对不对**：插件里的端口是生成时写死的。跑一次 `node install.mjs`，
+   它会重新探测空闲端口并把插件同步过去，然后**重开插件窗口**（不是重新导入）。
 
 ### 报「配对已失效」
 
-插件里的 token 和桥的 token 不一致。基本只有一个原因：**你运行的不是最新生成的那份插件**，
-或者状态目录被重新初始化过。
+插件里的 token 和桥的 token 不一致。常见两种原因：
+
+- **你运行的不是最新生成的那份插件**，或者状态目录被重新初始化过。
+- **插件连到了另一个 Figma 桥**。同端口上如果蹲着别的实现（旧版 DSH / Codex 之类），
+  它也会回一句 `Pairing token required`，但 token 不是你的 —— 表现就是「配对校验失败」。
+  v1.2 起桥改双栈监听 + 响应头标识，这种撞车已经能自己让开；旧版本请升级。
 
 ```bash
 node install.mjs
 ```
 
-然后用它打印的 `manifest.json` 重新导入一次。旧条目可以在 `Plugins → Manage plugins` 里删掉。
+然后用它打印的 `manifest.json` 重新导入一次（或直接 `node install.mjs --register`）。
+旧条目可以在 `Plugins → Manage plugins` 里删掉。
 
 ### Figma 报「manifest.json — 文件名无效」
 
-**不是文件名的问题。** Figma 按插件 id 去重，这个插件你已经导入过了，重复导入就报这个错。
-不用重新导入，直接在 `Plugins → Development` 里运行已有的那个。
+**先别怀疑文件名。** 这个提示是 Figma 那个导入对话框的通用兜底文案，实测有两种触发场景：
+
+| 场景 | 处理 |
+|---|---|
+| 这个插件 id 已经导入过，Figma 按 id 去重 | 别重复导入，直接在 `Plugins → Development` 里运行已有的那条；或 `node install.mjs --new-id` 换一个身份 |
+| 对话框本身挑路径（同一份 manifest 换个目录就能导入） | 绕开对话框：`node install.mjs --register` |
+
+`--register` 会直接写 Figma 的插件列表，前提是 **Figma 已完全退出** —— 否则它退出时会把整份配置覆盖回去。
+
+### 端口被别的程序占了
+
+`install.mjs` 会自动往后找可用端口，并把同一个端口写进插件和 MCP 配置，不用手动改。
+十个端口全被占才需要显式指定：
+
+```bash
+node install.mjs --port 3080
+```
+
+判断端口上是不是自己的桥：
+
+```bash
+curl -i http://localhost:3055/health
+```
+
+有 `x-workbuddy-figma: 1` 响应头才是本项目的桥。**没有响应头就别复用这个端口**，
+换个端口更省事 —— 两条桥挤在同一个号上，`localhost` 解析到哪一边是不确定的。
+
+> 版本提醒：v1.2 之前桥只绑 `127.0.0.1`，遇到「只占 IPv4 的邻居」时，
+> Figma 走 `localhost` 会优先落到 `::1`，请求就跑去别人那里了。
+> 这类「明明在跑却一直连不上」的问题升级到这个版本即消失。
 
 ### 每次改完，画布都跳回第一页
 
@@ -240,26 +305,6 @@ await figma.setCurrentPageAsync(target)
 await page.loadAsync()          // 或者 await figma.loadAllPagesAsync()
 ```
 
-### 报端口 3055 被占用
-
-`install.mjs` 会自动往后找可用端口（3055→3064），并把同一个端口写进插件和 MCP 配置，不需要你手动改。
-如果十个端口全被占，才需要显式指定：
-
-```bash
-node install.mjs --port 3080
-```
-
-注意：**换端口后必须重新导入插件**，端口是写死在插件里的。
-
-想看是谁占着：
-
-```bash
-netstat -ano | findstr :3055
-```
-
-有时候 `netstat` 看不到监听、但绑定依然失败 —— 那是 Windows 的保留端口段或被杀进程留下的半关闭
-socket，重启系统或直接换端口都能绕开。
-
 ### WorkBuddy 里看不到 figma 工具
 
 按顺序排查：① 重启过 WorkBuddy 吗 ② 连接器里点「信任」了吗 ③ 看 `~/.workbuddy/mcp.json`
@@ -275,8 +320,10 @@ socket，重启系统或直接换端口都能绕开。
 ## 安全说明
 
 - 配对 token 是安装时本机随机生成的 32 字节，**只存在你本机**，不上传任何服务器。
-- 桥只监听 `127.0.0.1`，并且校验 `Origin` 必须是 Figma 域名，外部访问会被拒。
-- 生成的 `companion/` 目录**含本机凭证**，`.gitignore` 已经排除了它。别手动提交。
+- 桥只监听**回环地址**（`127.0.0.1` 与 `::1`，双栈是为了让 Figma 的 `localhost` 请求一定能回到自己人手上），
+  并且校验 `Origin` 必须是 Figma 域名，外部访问会被拒。
+- 生成的插件目录含**本机凭证**：默认在 `~/Documents/workbuddy-figma-plugin`，
+  `companion/` 模板目录已在 `.gitignore` 里排除。别把生成物提交上去。
 - 整个链路不经过任何第三方服务器，WorkBuddy → 本地 → Figma，三点直连。
 
 ---
@@ -285,18 +332,25 @@ socket，重启系统或直接换端口都能绕开。
 
 ```
 workbuddy-figma/
-├── install.mjs          一键安装：生成 token、配对插件、写 MCP 配置
+├── install.mjs          一键安装：生成 token、配对插件、写 MCP 配置、注册到 Figma
 ├── server.mjs           MCP stdio 服务端，21 个工具
-├── selftest.mjs         端到端自检（自带假 Figma 插件）
+├── selftest.mjs         端到端自检（自带假 Figma 插件，随机端口，不影响日常插件）
 ├── lib/
-│   ├── bridge.mjs       HTTP 长轮询桥（连接、队列、超时、状态机）
+│   ├── bridge.mjs       HTTP 长轮询桥（双栈监听、连接、队列、超时、状态机）
 │   ├── catalog.mjs      18 个画布工具的定义与 JSON Schema
 │   ├── assets.mjs       素材读写（base64、SVG 校验、路径穿越防护）
-│   └── companion.mjs    配对插件生成
+│   └── companion.mjs    配对插件生成（注入 token、端口、插件 id）
 └── companion/           Figma 插件资源（未配对模板）
     ├── manifest.json
     ├── code.js          跑在 Figma 沙箱里的主线程
     └── ui.html          插件 UI，通过 postMessage 与主线程通信
+```
+
+运行期产物（不进仓库）：
+
+```
+~/.workbuddy/workbuddy-figma/      配对 token、插件 id 的 salt
+~/Documents/workbuddy-figma-plugin/  实际给 Figma 用的已配对插件（含本机 token）
 ```
 
 ---

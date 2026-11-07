@@ -45,7 +45,18 @@ let companionCache = null
 const token = await ensureToken(STATE)
 
 async function ensureCompanion(port) {
-  if (!companionCache) companionCache = await prepareCompanion({ root: ROOT, stateDir: STATE, token, port })
+  if (!companionCache) {
+    companionCache = await prepareCompanion({
+      root: ROOT,
+      stateDir: STATE,
+      token,
+      port,
+      // 默认放到用户看得见的目录：Figma 的「选择 manifest」对话框对隐藏目录支持不稳，
+      // 而且 ~/.workbuddy 在资源管理器里默认不可见。自检用环境变量指向临时目录，
+      // 否则会把用户正在用的已配对插件覆盖掉。
+      targetDir: process.env.WORKBUDDY_FIGMA_PLUGIN_DIR || join(homedir(), 'Documents', 'workbuddy-figma-plugin'),
+    })
+  }
   return companionCache
 }
 let bridge = null
@@ -55,15 +66,16 @@ const sessions = new Map()
 
 try {
   bridge = new LocalBridge({ token, port: PORT, timeoutMs: TIMEOUT_MS })
-  // 3055 被别的进程（旧版桥、DSH 本体）占住时不再整体失败，向后腾 10 个端口。
-  // 端口变了伴生插件会跟着重新生成，但老插件连的是老端口，需要重新导入一次。
-  // 显式指定端口（自检、多实例并行）时不回退，避免连错端口。
-  const portCandidates = process.env.FIGMA_BRIDGE_PORT
-    ? [PORT]
-    : Array.from({ length: 10 }, (_, index) => PORT + index)
+  // 永远允许顺延。别的 Figma 桥（旧版 DSH / Codex）经常赖在 3055 上，
+  // 一旦死守单端口，桥就绑不上，插件那边表现成「一直连接中」。
+  const portCandidates = Array.from({ length: 10 }, (_, index) => PORT + index)
   await bridge.start({ portCandidates })
   log(`bridge listening on 127.0.0.1:${bridge.port}`)
-  if (bridge.port !== PORT) log(`端口 ${PORT} 被占用，已改用 ${bridge.port}；伴生插件需要重新导入才能连上`)
+  if (bridge.port !== PORT) log(`端口 ${PORT} 被占用，已改用 ${bridge.port}`)
+  // 启动即把伴生插件同步到真实端口，Figma 下次运行插件时读到的就是对的地址
+  ensureCompanion(bridge.port)
+    .then((c) => log(`companion synced → ${c.folder} (port ${c.port})`))
+    .catch((error) => log('companion sync failed:', error.message))
 } catch (error) {
   bridgeError = error.code === 'EADDRINUSE' ? `端口 ${PORT}–${PORT + 9} 均被占用（可能另一个 Figma 桥已在运行）` : String(error.message || error)
   log('bridge failed:', bridgeError)

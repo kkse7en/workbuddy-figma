@@ -15,34 +15,76 @@
  */
 import { readFile, writeFile, copyFile } from 'node:fs/promises'
 import { createServer } from 'node:net'
+import { get } from 'node:http'
+import { spawn } from 'node:child_process'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { randomBytes } from 'node:crypto'
 import { ensureToken, prepareCompanion } from './lib/companion.mjs'
 
 const ROOT = dirname(fileURLToPath(import.meta.url))
 const WF_DIR = join(homedir(), '.workbuddy')
 const MCP_FILE = join(WF_DIR, 'mcp.json')
 const STATE_DIR = join(WF_DIR, 'workbuddy-figma')
+const PLUGIN_DIR = join(homedir(), 'Documents', 'workbuddy-figma-plugin')
+const FIGMA_SETTINGS = join(process.env.APPDATA || join(homedir(), 'AppData', 'Roaming'), 'Figma', 'settings.json')
 
 const args = process.argv.slice(2)
 const dryRun = args.includes('--dry-run')
+const newId = args.includes('--new-id')
+const register = args.includes('--register')
 const portIndex = args.indexOf('--port')
 const requestedPort = portIndex !== -1 ? Number(args[portIndex + 1]) : 3055
+const SALT_FILE = join(STATE_DIR, 'companion-id-salt')
 
-/** 端口能不能 bind。占用了就往后找，否则插件和桥对不上，用户会一直「连不上」。 */
+/** Figma 开着的时候写 settings.json，会在它退出时被整份覆盖，白忙一场。 */
+const figmaRunning = () =>
+  new Promise((resolve) => {
+    const isWin = process.platform === 'win32'
+    const child = spawn(isWin ? 'tasklist' : 'pgrep', isWin ? ['/FI', 'IMAGENAME eq Figma.exe'] : ['-x', 'Figma'], {
+      windowsHide: true,
+    })
+    let out = ''
+    child.stdout?.on('data', (chunk) => (out += chunk))
+    child.on('error', () => resolve(false))
+    child.on('close', () => resolve(isWin ? /Figma\.exe/i.test(out) : child.exitCode === 0))
+  })
+
+/**
+ * 端口能不能拿来做桥。
+ * 必须按双栈探测：别的 Figma 桥常常只占 127.0.0.1，而 Figma 里的 fetch 走 localhost
+ * 会优先解析到 ::1 —— 只测 IPv4 会把这种端口误判成空闲，插件就永远连到别人身上。
+ */
 const portFree = (port) =>
   new Promise((resolve) => {
     const probe = createServer()
     probe.once('error', () => resolve(false))
     probe.once('listening', () => probe.close(() => resolve(true)))
-    probe.listen(port, '127.0.0.1')
+    probe.listen({ port, host: '::', ipv6Only: false })
+  })
+
+/**
+ * 端口上跑的到底是不是「我们自己的桥」。
+ * 同端口上可能躺着别的 Figma 桥（旧版 DSH / Codex），它们连 401 文案都一样，
+ * 只能靠响应头标识区分，不能只看状态码。
+ */
+const isOurBridge = (port) =>
+  new Promise((resolve) => {
+    const req = get({ host: '127.0.0.1', port, path: '/health', timeout: 1500 }, (res) => {
+      resolve(res.headers['x-workbuddy-figma'] === '1')
+      res.resume()
+    })
+    req.on('error', () => resolve(false))
+    req.on('timeout', () => { req.destroy(); resolve(false) })
   })
 
 let PORT = requestedPort
 if (Number.isInteger(requestedPort) && requestedPort >= 1024 && requestedPort <= 65535) {
   for (let offset = 0; offset < 10; offset++) {
-    if (await portFree(requestedPort + offset)) { PORT = requestedPort + offset; break }
+    const candidate = requestedPort + offset
+    if (await portFree(candidate)) { PORT = candidate; break }
+    if (await isOurBridge(candidate)) { PORT = candidate; break }
   }
 }
 
@@ -68,8 +110,72 @@ info(`桥接端口 ${PORT}` + (PORT !== requestedPort ? `（${requestedPort} 已
 const token = await ensureToken(STATE_DIR)
 ok('配对 token 已就绪')
 
-const companion = await prepareCompanion({ root: ROOT, stateDir: STATE_DIR, token, port: PORT })
+// Figma 按 manifest.id 去重，同 id 二次导入会报「文件名无效」。--new-id 换一个身份。
+let idSalt = ''
+try {
+  idSalt = (await readFile(SALT_FILE, 'utf8')).trim()
+} catch (error) {
+  if (error.code !== 'ENOENT') throw error
+}
+if (newId || !idSalt) {
+  idSalt = randomBytes(4).toString('hex')
+  await writeFile(SALT_FILE, idSalt + '\n')
+  ok(`插件 id 已更新（salt ${idSalt}）`)
+}
+
+const companion = await prepareCompanion({ root: ROOT, stateDir: STATE_DIR, token, port: PORT, idSalt, targetDir: PLUGIN_DIR })
 ok(`Figma 插件已生成 → ${companion.folder}`)
+const manifestId = JSON.parse(await readFile(companion.manifest, 'utf8')).id
+info(`插件 id ${manifestId}`)
+
+/**
+ * 直接把插件写进 Figma 的插件列表，跳过「Import plugin from manifest」对话框。
+ * 那个对话框对路径挑剔，报「文件名无效」时又给不出原因，绕开它最省事。
+ * 必须关掉 Figma 再写，否则退出时会被覆盖。
+ */
+if (register) {
+  if (!dryRun && (await figmaRunning()) && !args.includes('--force')) {
+    fail(
+      'Figma 正在运行。现在写注册表，会在 Figma 退出时被它整份覆盖。\n' +
+        '     请完全退出 Figma（含托盘图标）后重跑：node install.mjs --register\n' +
+        '     确实要现在写就加 --force，但基本不会生效。'
+    )
+  }
+  const readSettings = async () => JSON.parse(await readFile(FIGMA_SETTINGS, 'utf8'))
+  let settings
+  try {
+    settings = await readSettings()
+  } catch (error) {
+    fail(`读不到 Figma 配置（${FIGMA_SETTINGS}）：${error.message}`)
+  }
+  const list = Array.isArray(settings.localFileExtensions) ? settings.localFileExtensions : []
+  // 清掉指向本目录的旧条目，避免重复堆叠
+  const kept = list.filter((e) => !String(e.manifestPath || '').startsWith(PLUGIN_DIR))
+  let nextId = kept.reduce((max, e) => Math.max(max, Number(e.id) || 0), 0) + 1
+  const manifestFileId = nextId++
+  const codeFileId = nextId++
+  const uiFileId = nextId++
+  kept.push({
+    id: manifestFileId,
+    manifestPath: companion.manifest,
+    lastKnownName: 'workbuddy-figma',
+    lastKnownPluginId: manifestId,
+    fileMetadata: { type: 'manifest', codeFileId, uiFileIds: [uiFileId] },
+  })
+  kept.push({ id: codeFileId, manifestPath: join(companion.folder, 'code.js'), fileMetadata: { type: 'code', manifestFileId } })
+  kept.push({ id: uiFileId, manifestPath: join(companion.folder, 'ui.html'), fileMetadata: { type: 'ui', manifestFileId } })
+  settings.localFileExtensions = kept
+
+  if (dryRun) {
+    info(`[dry-run] 会向 Figma 注册 ${kept.length} 条记录`)
+  } else {
+    const backup = `${FIGMA_SETTINGS}.bak-${Date.now()}`
+    await copyFile(FIGMA_SETTINGS, backup)
+    await writeFile(FIGMA_SETTINGS, JSON.stringify(settings, null, 2) + '\n')
+    ok(`已写入 Figma 插件列表（备份 ${backup}）`)
+    ok('重启 Figma 后，Plugins → Development 里会直接出现 workbuddy-figma')
+  }
+}
 
 /* 2. 写 mcp.json */
 let config = { mcpServers: {} }
@@ -125,10 +231,16 @@ console.log('  1) 重启 WorkBuddy')
 console.log('     MCP 配置只在启动时读取一次，不重启不会生效。\n')
 console.log('  2) 在连接器管理里给 figma 点「信任」')
 console.log('     自定义 MCP 需要手动授权，这是安全设计。\n')
-console.log('  3) 在 Figma 桌面端导入插件并运行')
-console.log('     Plugins → Development → Import plugin from manifest…')
-console.log(`     选这个文件：\n     \x1b[36m${companion.manifest}\x1b[0m`)
-console.log('     然后在目标设计文件里运行「workbuddy-figma」，插件窗口别关。\n')
+if (register && !dryRun) {
+  console.log('  3) 重启 Figma，直接运行已注册好的插件')
+  console.log('     Plugins → Development → workbuddy-figma\n')
+} else {
+  console.log('  3) 在 Figma 桌面端导入插件并运行')
+  console.log('     Plugins → Development → Import plugin from manifest…')
+  console.log(`     选这个文件：\n     \x1b[36m${companion.manifest}\x1b[0m`)
+  console.log('     如果对话框报「文件名无效」，改用：')
+  console.log(`     \x1b[36mnode install.mjs --register\x1b[0m （先完全退出 Figma）\n`)
+}
 
 console.log('\x1b[1m验证\x1b[0m')
 console.log('  在 WorkBuddy 里说一句「看看 Figma 连接状态」，或直接运行：')

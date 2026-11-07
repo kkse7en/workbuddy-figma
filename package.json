@@ -1,6 +1,6 @@
 {
   "name": "workbuddy-figma",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "workbuddy-figma —— 在 WorkBuddy 里直接读写 Figma 画布：基于 Figma Plugin API 的本地桥接，不消耗 Figma 官方 MCP 额度。",
   "type": "module",
   "main": "server.mjs",

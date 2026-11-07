@@ -11,17 +11,32 @@
  */
 import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
+import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { ensureToken } from './lib/companion.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
-const PORT = Number(process.env.SELFTEST_PORT || 3056)
-// 自检必须用自己的状态目录，否则会覆写用户正在用的已配对插件（端口、token 全变）。
+// 自检必须用自己的状态目录和插件目录，否则会覆写用户正在用的已配对插件（端口、token 全变）。
 const STATE = join(tmpdir(), 'workbuddy-figma-selftest')
 const TOKEN = await ensureToken(STATE)
-const BASE = `http://127.0.0.1:${PORT}`
+
+/** 要一个当前没人用的端口，避免撞上用户正在跑的桥或其他 Figma 工具。 */
+const freePort = () =>
+  new Promise((resolve, reject) => {
+    const probe = createServer()
+    probe.once('error', reject)
+    probe.listen({ port: 0, host: '::', ipv6Only: false }, () => {
+      const { port } = probe.address()
+      probe.close(() => resolve(port))
+    })
+  })
+
+const PORT = process.env.SELFTEST_PORT ? Number(process.env.SELFTEST_PORT) : await freePort()
+// 服务端可能因为端口刚好被抢而顺延，真实端口以它自己的日志为准。
+let activePort = PORT
+const baseUrl = () => `http://127.0.0.1:${activePort}`
 const HEADERS = {
   authorization: `Bearer ${TOKEN}`,
   'content-type': 'application/json',
@@ -38,7 +53,7 @@ const check = (name, condition, detail = '') => {
 
 const received = []
 async function fakePlugin() {
-  const connected = await fetch(`${BASE}/connect`, {
+  const connected = await fetch(`${baseUrl()}/connect`, {
     method: 'POST',
     headers: HEADERS,
     body: JSON.stringify({
@@ -55,7 +70,7 @@ async function fakePlugin() {
   console.log(`  · 假插件已连接 connectionId=${connectionId.slice(0, 8)}`)
 
   for (;;) {
-    const polled = await fetch(`${BASE}/poll`, {
+    const polled = await fetch(`${baseUrl()}/poll`, {
       method: 'POST',
       headers: HEADERS,
       body: JSON.stringify({ connectionId }),
@@ -79,7 +94,7 @@ async function fakePlugin() {
           }
         : { value: { echo: job.method }, images: [] }
 
-    await fetch(`${BASE}/result`, {
+    await fetch(`${baseUrl()}/result`, {
       method: 'POST',
       headers: HEADERS,
       body: JSON.stringify({ connectionId, id: job.id, ok: true, result }),
@@ -91,10 +106,34 @@ async function fakePlugin() {
 
 const server = spawn(process.execPath, [join(HERE, 'server.mjs')], {
   cwd: HERE,
-  env: { ...process.env, FIGMA_BRIDGE_PORT: String(PORT), WORKBUDDY_FIGMA_STATE: STATE, CODEBUDDY_PROJECT_DIR: HERE },
+  env: {
+    ...process.env,
+    FIGMA_BRIDGE_PORT: String(PORT),
+    WORKBUDDY_FIGMA_STATE: STATE,
+    WORKBUDDY_FIGMA_PLUGIN_DIR: join(STATE, 'plugin'),
+    CODEBUDDY_PROJECT_DIR: HERE,
+  },
   stdio: ['pipe', 'pipe', 'pipe'],
 })
-server.stderr.on('data', () => {}) // 服务端日志不参与断言
+
+/** 等桥报出自己的真实端口，再开始发请求。 */
+const ready = new Promise((resolve) => {
+  let seen = ''
+  const timer = setTimeout(() => resolve(false), 10000)
+  server.stderr.on('data', (chunk) => {
+    const text = chunk.toString()
+    seen += text
+    const match = /bridge listening on 127\.0\.0\.1:(\d+)/.exec(text)
+    if (match) {
+      activePort = Number(match[1])
+      clearTimeout(timer)
+      resolve(true)
+    } else if (/bridge failed:/.test(seen)) {
+      clearTimeout(timer)
+      resolve(false)
+    }
+  })
+})
 
 const waiting = new Map()
 let buffer = ''
@@ -135,6 +174,11 @@ function rpc(method, params) {
 /* ------------------------------------------------ 跑测试 */
 
 try {
+  console.log('0) 桥启动')
+  const bridged = await ready
+  check('桥已监听', bridged, `127.0.0.1:${activePort}`)
+  if (!bridged) throw new Error('桥没能启动，后面的用例没有意义')
+
   console.log('1) 握手')
   const init = await rpc('initialize', {
     protocolVersion: '2024-11-05',
@@ -158,11 +202,17 @@ try {
   console.log('4) 假插件接入')
   const plugin = fakePlugin()
   plugin.catch(() => {})
-  await new Promise((r) => setTimeout(r, 800))
 
-  const status = await rpc('tools/call', { name: 'figma_status', arguments: {} })
-  const statusValue = JSON.parse(status.result?.content?.[0]?.text ?? '{}')
-  check('figma_status 看到 1 个文档', statusValue.documents?.length === 1, statusValue.documents?.[0]?.name)
+  // 等插件完成握手，不靠固定 sleep（慢机器上 800ms 不够，会误报失败）
+  let statusValue = {}
+  for (let attempt = 0; attempt < 25; attempt++) {
+    const status = await rpc('tools/call', { name: 'figma_status', arguments: {} })
+    statusValue = JSON.parse(status.result?.content?.[0]?.text ?? '{}')
+    if ((statusValue.documents ?? []).some((doc) => doc.name === '自检画板')) break
+    await new Promise((r) => setTimeout(r, 200))
+  }
+  const selfDoc = (statusValue.documents ?? []).find((doc) => doc.name === '自检画板')
+  check('figma_status 看到自检画板', !!selfDoc, selfDoc ? `connectionId=${selfDoc.connectionId.slice(0, 8)}` : '未出现')
 
   console.log('5) 真实任务往返')
   const selection = await rpc('tools/call', { name: 'get_selection', arguments: {} })
