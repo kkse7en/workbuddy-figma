@@ -52,15 +52,25 @@ const figmaRunning = () =>
   })
 
 /**
- * 端口能不能拿来做桥。
- * 必须按双栈探测：别的 Figma 桥常常只占 127.0.0.1，而 Figma 里的 fetch 走 localhost
- * 会优先解析到 ::1 —— 只测 IPv4 会把这种端口误判成空闲，插件就永远连到别人身上。
+ * 端口上有没有人在服务。
+ * 只靠 bind 会误判：Windows 上别的程序绑了 127.0.0.1:3055，我们 bind :: 依然能成功，
+ * 但 Figma 里的 localhost 请求可能落到对方那边 —— 这正是「一直连不上」的根源。
+ * 所以 bind 通过之后，再发一次 HTTP 确认真的没人应答。
  */
-const portFree = (port) =>
+const portInUse = (port) =>
   new Promise((resolve) => {
     const probe = createServer()
-    probe.once('error', () => resolve(false))
-    probe.once('listening', () => probe.close(() => resolve(true)))
+    probe.once('error', () => resolve(true))
+    probe.once('listening', () => {
+      probe.close(() => {
+        const req = get({ host: '127.0.0.1', port, path: '/health', timeout: 800 }, (res) => {
+          res.resume()
+          resolve(true)
+        })
+        req.on('error', () => resolve(false))
+        req.on('timeout', () => { req.destroy(); resolve(false) })
+      })
+    })
     probe.listen({ port, host: '::', ipv6Only: false })
   })
 
@@ -81,10 +91,25 @@ const isOurBridge = (port) =>
 
 let PORT = requestedPort
 if (Number.isInteger(requestedPort) && requestedPort >= 1024 && requestedPort <= 65535) {
+  // 第一优先：自己已经在这个区段跑着的桥。重装时必须复用它，
+  // 否则插件会被改到新端口，而真正在跑的桥还在老端口上。
+  let reused = false
   for (let offset = 0; offset < 10; offset++) {
-    const candidate = requestedPort + offset
-    if (await portFree(candidate)) { PORT = candidate; break }
-    if (await isOurBridge(candidate)) { PORT = candidate; break }
+    if (await isOurBridge(requestedPort + offset)) {
+      PORT = requestedPort + offset
+      reused = true
+      break
+    }
+  }
+  // 没有现成的桥，就找第一个真的没人用的端口
+  if (!reused) {
+    for (let offset = 0; offset < 10; offset++) {
+      const candidate = requestedPort + offset
+      if (!(await portInUse(candidate))) {
+        PORT = candidate
+        break
+      }
+    }
   }
 }
 
@@ -104,11 +129,11 @@ if (!Number.isInteger(PORT) || PORT < 1024 || PORT > 65535) fail(`端口无效�
 console.log('\n\x1b[1mworkbuddy-figma · 安装\x1b[0m\n')
 info(`Node ${process.versions.node}`)
 info(`项目目录 ${ROOT}`)
-info(`桥接端口 ${PORT}` + (PORT !== requestedPort ? `（${requestedPort} 已被占用，自动改用 ${PORT}）` : ''))
+info(`桥接端口 ${PORT}` + (PORT !== requestedPort ? `（${requestedPort} 起已有占用，实际用 ${PORT}）` : ''))
 
 /* 1. token + 伴生插件 */
-const token = await ensureToken(STATE_DIR)
-ok('配对 token 已就绪')
+const token = dryRun ? '0'.repeat(64) : await ensureToken(STATE_DIR)
+ok(dryRun ? '配对 token 将在此生成' : '配对 token 已就绪')
 
 // Figma 按 manifest.id 去重，同 id 二次导入会报「文件名无效」。--new-id 换一个身份。
 let idSalt = ''
@@ -117,15 +142,20 @@ try {
 } catch (error) {
   if (error.code !== 'ENOENT') throw error
 }
-if (newId || !idSalt) {
+if (!dryRun && (newId || !idSalt)) {
   idSalt = randomBytes(4).toString('hex')
   await writeFile(SALT_FILE, idSalt + '\n')
   ok(`插件 id 已更新（salt ${idSalt}）`)
 }
 
-const companion = await prepareCompanion({ root: ROOT, stateDir: STATE_DIR, token, port: PORT, idSalt, targetDir: PLUGIN_DIR })
-ok(`Figma 插件已生成 → ${companion.folder}`)
-const manifestId = JSON.parse(await readFile(companion.manifest, 'utf8')).id
+// dry-run 必须一个字节都不写：只算出路径用于展示
+const companion = dryRun
+  ? { manifest: join(PLUGIN_DIR, 'manifest.json'), folder: PLUGIN_DIR, port: PORT }
+  : await prepareCompanion({ root: ROOT, stateDir: STATE_DIR, token, port: PORT, idSalt, targetDir: PLUGIN_DIR })
+ok(`Figma 插件${dryRun ? '将生成到' : '已生成'} → ${companion.folder}`)
+const manifestId = dryRun
+  ? '(dry-run 未生成)'
+  : JSON.parse(await readFile(companion.manifest, 'utf8')).id
 info(`插件 id ${manifestId}`)
 
 /**
