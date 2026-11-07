@@ -168,47 +168,54 @@ info(`插件 id ${manifestId}`)
  * 那个对话框对路径挑剔，报「文件名无效」时又给不出原因，绕开它最省事。
  * 必须关掉 Figma 再写，否则退出时会被覆盖。
  */
+let registerPending = false
 if (register) {
-  if (!dryRun && (await figmaRunning()) && !args.includes('--force')) {
-    fail(
-      'Figma 正在运行。现在写注册表，会在 Figma 退出时被它整份覆盖。\n' +
-        '     请完全退出 Figma（含托盘图标）后重跑：node install.mjs --register\n' +
-        '     确实要现在写就加 --force，但基本不会生效。'
-    )
+  // Figma 开着写注册表等于白写：它退出时会把 settings.json 整份盖回去。
+  // 但不能因此中断整个安装 —— MCP 配置和插件已经生成好了，直接退出会让用户
+  // 以为全都失败了。这里只跳过注册，把 mcp.json 照常写完，最后提示重跑一次。
+  if (!dryRun && !args.includes('--force') && (await figmaRunning())) {
+    registerPending = true
+    warn('检测到 Figma 正在运行，本次跳过注册（退出时会覆盖配置）')
+    info('其余步骤照常完成。完全退出 Figma 后再跑一次 install.mjs --register 即可')
   }
-  const readSettings = async () => JSON.parse(await readFile(FIGMA_SETTINGS, 'utf8'))
-  let settings
-  try {
-    settings = await readSettings()
-  } catch (error) {
-    fail(`读不到 Figma 配置（${FIGMA_SETTINGS}）：${error.message}`)
-  }
-  const list = Array.isArray(settings.localFileExtensions) ? settings.localFileExtensions : []
-  // 清掉指向本目录的旧条目，避免重复堆叠
-  const kept = list.filter((e) => !String(e.manifestPath || '').startsWith(PLUGIN_DIR))
-  let nextId = kept.reduce((max, e) => Math.max(max, Number(e.id) || 0), 0) + 1
-  const manifestFileId = nextId++
-  const codeFileId = nextId++
-  const uiFileId = nextId++
-  kept.push({
-    id: manifestFileId,
-    manifestPath: companion.manifest,
-    lastKnownName: 'workbuddy-figma',
-    lastKnownPluginId: manifestId,
-    fileMetadata: { type: 'manifest', codeFileId, uiFileIds: [uiFileId] },
-  })
-  kept.push({ id: codeFileId, manifestPath: join(companion.folder, 'code.js'), fileMetadata: { type: 'code', manifestFileId } })
-  kept.push({ id: uiFileId, manifestPath: join(companion.folder, 'ui.html'), fileMetadata: { type: 'ui', manifestFileId } })
-  settings.localFileExtensions = kept
+}
 
-  if (dryRun) {
-    info(`[dry-run] 会向 Figma 注册 ${kept.length} 条记录`)
-  } else {
-    const backup = `${FIGMA_SETTINGS}.bak-${Date.now()}`
-    await copyFile(FIGMA_SETTINGS, backup)
-    await writeFile(FIGMA_SETTINGS, JSON.stringify(settings, null, 2) + '\n')
-    ok(`已写入 Figma 插件列表（备份 ${backup}）`)
-    ok('重启 Figma 后，Plugins → Development 里会直接出现 workbuddy-figma')
+if (register && !registerPending) {
+  const readSettings = async () => JSON.parse(await readFile(FIGMA_SETTINGS, 'utf8'))
+  try {
+    const settings = await readSettings()
+    const list = Array.isArray(settings.localFileExtensions) ? settings.localFileExtensions : []
+    // 清掉指向本目录的旧条目，避免重复堆叠
+    const kept = list.filter((e) => !String(e.manifestPath || '').startsWith(PLUGIN_DIR))
+    let nextId = kept.reduce((max, e) => Math.max(max, Number(e.id) || 0), 0) + 1
+    const manifestFileId = nextId++
+    const codeFileId = nextId++
+    const uiFileId = nextId++
+    kept.push({
+      id: manifestFileId,
+      manifestPath: companion.manifest,
+      lastKnownName: 'workbuddy-figma',
+      lastKnownPluginId: manifestId,
+      fileMetadata: { type: 'manifest', codeFileId, uiFileIds: [uiFileId] },
+    })
+    kept.push({ id: codeFileId, manifestPath: join(companion.folder, 'code.js'), fileMetadata: { type: 'code', manifestFileId } })
+    kept.push({ id: uiFileId, manifestPath: join(companion.folder, 'ui.html'), fileMetadata: { type: 'ui', manifestFileId } })
+    settings.localFileExtensions = kept
+
+    if (dryRun) {
+      info(`[dry-run] 会向 Figma 注册 ${kept.length} 条记录`)
+    } else {
+      const backup = `${FIGMA_SETTINGS}.bak-${Date.now()}`
+      await copyFile(FIGMA_SETTINGS, backup)
+      await writeFile(FIGMA_SETTINGS, JSON.stringify(settings, null, 2) + '\n')
+      ok(`已写入 Figma 插件列表（备份 ${backup}）`)
+      ok('重启 Figma 后，Plugins → Development 里会直接出现 workbuddy-figma')
+    }
+  } catch (error) {
+    // 注册失败不该拖垮安装：mcp.json 还没写，用户会以为整件事都失败了。
+    warn(`注册 Figma 插件失败：${error.message}`)
+    info('不影响后续步骤。可以手动导入这个文件：')
+    info(companion.manifest)
   }
 }
 
@@ -266,7 +273,12 @@ console.log('  1) 重启 WorkBuddy')
 console.log('     MCP 配置只在启动时读取一次，不重启不会生效。\n')
 console.log('  2) 在连接器管理里给 figma 点「信任」')
 console.log('     自定义 MCP 需要手动授权，这是安全设计。\n')
-if (register && !dryRun) {
+if (registerPending) {
+  console.log('  3) 完全退出 Figma，然后重跑一次注册')
+  console.log('     这一步刚才跳过了，因为 Figma 开着写进去会被覆盖。')
+  console.log(`     \x1b[36mnode install.mjs --register\x1b[0m`)
+  console.log('     跑完再打开 Figma → Plugins → Development → workbuddy-figma\n')
+} else if (register && !dryRun) {
   console.log('  3) 重启 Figma，直接运行已注册好的插件')
   console.log('     Plugins → Development → workbuddy-figma\n')
 } else {

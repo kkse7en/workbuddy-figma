@@ -104,6 +104,9 @@ node install.mjs --register
 它会把这个插件直接写进 Figma 的插件列表。重新打开 Figma，
 `Plugins → Development` 里就会出现 `workbuddy-figma`，不用再选文件。
 
+> 忘了关 Figma 也没关系：脚本会检测到并**跳过注册**（开着写进去会被 Figma 退出时覆盖），
+> 其余步骤照常完成，最后提示你关掉 Figma 再跑一次这条命令。
+
 > 为什么推荐这条：Figma 的「Import plugin from manifest」对话框在部分环境下会对
 > 本地路径报一句 `manifest.json 文件名无效`，但不说哪里无效。实测同样的 manifest
 > 换个目录就能导入，是对话框自身的问题。直接写注册表可以完全绕开。
