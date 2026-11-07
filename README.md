@@ -107,6 +107,11 @@ node install.mjs --register
 > 为什么推荐这条：Figma 的「Import plugin from manifest」对话框在部分环境下会对
 > 本地路径报一句 `manifest.json 文件名无效`，但不说哪里无效。实测同样的 manifest
 > 换个目录就能导入，是对话框自身的问题。直接写注册表可以完全绕开。
+>
+> 脚本会自动定位各平台的 Figma 配置：
+> `%APPDATA%\Figma\settings.json`（Windows）、
+> `~/Library/Application Support/Figma/settings.json`（macOS）、
+> `~/.config/Figma/settings.json`（Linux）。
 
 **② 手动导入**
 

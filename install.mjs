@@ -28,7 +28,12 @@ const WF_DIR = join(homedir(), '.workbuddy')
 const MCP_FILE = join(WF_DIR, 'mcp.json')
 const STATE_DIR = join(WF_DIR, 'workbuddy-figma')
 const PLUGIN_DIR = join(homedir(), 'Documents', 'workbuddy-figma-plugin')
-const FIGMA_SETTINGS = join(process.env.APPDATA || join(homedir(), 'AppData', 'Roaming'), 'Figma', 'settings.json')
+const FIGMA_SETTINGS =
+  process.platform === 'darwin'
+    ? join(homedir(), 'Library', 'Application Support', 'Figma', 'settings.json')
+    : process.platform === 'win32'
+      ? join(process.env.APPDATA || join(homedir(), 'AppData', 'Roaming'), 'Figma', 'settings.json')
+      : join(process.env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'Figma', 'settings.json')
 
 const args = process.argv.slice(2)
 const dryRun = args.includes('--dry-run')
