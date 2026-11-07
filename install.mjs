@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * WorkBuddy Figma —— 一键安装
+ * workbuddy-figma —— 一键安装
  *
  * 做四件事：
  *   1. 生成这台机器专属的配对 token
@@ -14,6 +14,7 @@
  *   node install.mjs --dry-run       # 只看会改什么，不落盘
  */
 import { readFile, writeFile, copyFile } from 'node:fs/promises'
+import { createServer } from 'node:net'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -27,7 +28,23 @@ const STATE_DIR = join(WF_DIR, 'workbuddy-figma')
 const args = process.argv.slice(2)
 const dryRun = args.includes('--dry-run')
 const portIndex = args.indexOf('--port')
-const PORT = portIndex !== -1 ? Number(args[portIndex + 1]) : 3055
+const requestedPort = portIndex !== -1 ? Number(args[portIndex + 1]) : 3055
+
+/** 端口能不能 bind。占用了就往后找，否则插件和桥对不上，用户会一直「连不上」。 */
+const portFree = (port) =>
+  new Promise((resolve) => {
+    const probe = createServer()
+    probe.once('error', () => resolve(false))
+    probe.once('listening', () => probe.close(() => resolve(true)))
+    probe.listen(port, '127.0.0.1')
+  })
+
+let PORT = requestedPort
+if (Number.isInteger(requestedPort) && requestedPort >= 1024 && requestedPort <= 65535) {
+  for (let offset = 0; offset < 10; offset++) {
+    if (await portFree(requestedPort + offset)) { PORT = requestedPort + offset; break }
+  }
+}
 
 const ok = (s) => console.log(`  \x1b[32m✓\x1b[0m ${s}`)
 const info = (s) => console.log(`  \x1b[36m·\x1b[0m ${s}`)
@@ -42,10 +59,10 @@ const major = Number(process.versions.node.split('.')[0])
 if (major < 18) fail(`需要 Node.js 18 或更高版本，当前是 ${process.versions.node}`)
 if (!Number.isInteger(PORT) || PORT < 1024 || PORT > 65535) fail(`端口无效：${PORT}`)
 
-console.log('\n\x1b[1mWorkBuddy Figma · 安装\x1b[0m\n')
+console.log('\n\x1b[1mworkbuddy-figma · 安装\x1b[0m\n')
 info(`Node ${process.versions.node}`)
 info(`项目目录 ${ROOT}`)
-info(`桥接端口 ${PORT}`)
+info(`桥接端口 ${PORT}` + (PORT !== requestedPort ? `（${requestedPort} 已被占用，自动改用 ${PORT}）` : ''))
 
 /* 1. token + 伴生插件 */
 const token = await ensureToken(STATE_DIR)
@@ -111,7 +128,7 @@ console.log('     自定义 MCP 需要手动授权，这是安全设计。\n')
 console.log('  3) 在 Figma 桌面端导入插件并运行')
 console.log('     Plugins → Development → Import plugin from manifest…')
 console.log(`     选这个文件：\n     \x1b[36m${companion.manifest}\x1b[0m`)
-console.log('     然后在目标设计文件里运行「WorkBuddy Figma」，插件窗口别关。\n')
+console.log('     然后在目标设计文件里运行「workbuddy-figma」，插件窗口别关。\n')
 
 console.log('\x1b[1m验证\x1b[0m')
 console.log('  在 WorkBuddy 里说一句「看看 Figma 连接状态」，或直接运行：')

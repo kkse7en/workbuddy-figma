@@ -1,7 +1,7 @@
 {
   "name": "workbuddy-figma",
-  "version": "1.0.0",
-  "description": "在 WorkBuddy 里直接读写 Figma 画布：基于 Figma Plugin API 的本地桥接，不消耗 Figma 官方 MCP 额度。",
+  "version": "1.1.0",
+  "description": "workbuddy-figma —— 在 WorkBuddy 里直接读写 Figma 画布：基于 Figma Plugin API 的本地桥接，不消耗 Figma 官方 MCP 额度。",
   "type": "module",
   "main": "server.mjs",
   "scripts": {
@@ -15,11 +15,11 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/jayk067123-max/workbuddy-figma.git"
+    "url": "git+https://github.com/kkse7en/workbuddy-figma.git"
   },
-  "homepage": "https://github.com/jayk067123-max/workbuddy-figma#readme",
+  "homepage": "https://github.com/kkse7en/workbuddy-figma#readme",
   "bugs": {
-    "url": "https://github.com/jayk067123-max/workbuddy-figma/issues"
+    "url": "https://github.com/kkse7en/workbuddy-figma/issues"
   },
   "keywords": [
     "figma",
@@ -28,5 +28,5 @@
     "figma-plugin",
     "design-to-code"
   ],
-  "author": "jayk067123-max"
+  "author": "kkse7en"
 }

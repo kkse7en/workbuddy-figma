@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * figma-bridge —— 把本地桥接层
+ * workbuddy-figma —— 把 GitHub 项目 Duoasa/DSH-to-Figma 的本地桥接层
  * 包成一个标准 MCP server，供 WorkBuddy 直接使用。
  *
  * 链路：
@@ -8,7 +8,7 @@
  *        ↓  JSON-RPC over stdio
  *   本文件 (LocalBridge)
  *        ↓  HTTP 长轮询 127.0.0.1:3055  /connect /poll /result
- *   Figma 伴生插件（WorkBuddy Figma，已配对）
+ *   Figma 伴生插件（workbuddy-figma，已配对）
  *        ↓  Figma Plugin API
  *   你正在编辑的 Figma 文档（真实读写，不消耗 Star 计划 MCP 额度）
  *
@@ -26,13 +26,17 @@ import { readAssets, saveAssets, localResult } from './lib/assets.mjs'
 import { ensureToken, prepareCompanion } from './lib/companion.mjs'
 
 const ROOT = dirname(fileURLToPath(import.meta.url))
-const STATE = join(homedir(), '.workbuddy', 'workbuddy-figma')
+// 状态目录必须可覆盖：自检、多实例如果共用同一个目录，会互相覆写已配对插件的
+// token 和端口，用户那边的插件就会突然 401 或连错端口（表现为「莫名其妙连不上」）。
+const STATE = process.env.WORKBUDDY_FIGMA_STATE
+  ? resolve(process.env.WORKBUDDY_FIGMA_STATE)
+  : join(homedir(), '.workbuddy', 'workbuddy-figma')
 const PORT = Number(process.env.FIGMA_BRIDGE_PORT || 3055)
 const TIMEOUT_MS = Number(process.env.FIGMA_BRIDGE_TIMEOUT_MS || 120000)
 const WORKSPACE = resolve(process.env.CODEBUDDY_PROJECT_DIR || process.env.CLAUDE_PROJECT_DIR || process.cwd())
-const VERSION = '1.0.0'
+const VERSION = '1.1.0'
 
-const log = (...args) => process.stderr.write(`[figma-bridge] ${args.join(' ')}\n`)
+const log = (...args) => process.stderr.write(`[workbuddy-figma] ${args.join(' ')}\n`)
 
 /* ------------------------------------------------------------- 桥与状态 */
 
@@ -51,17 +55,24 @@ const sessions = new Map()
 
 try {
   bridge = new LocalBridge({ token, port: PORT, timeoutMs: TIMEOUT_MS })
-  await bridge.start()
+  // 3055 被别的进程（旧版桥、DSH 本体）占住时不再整体失败，向后腾 10 个端口。
+  // 端口变了伴生插件会跟着重新生成，但老插件连的是老端口，需要重新导入一次。
+  // 显式指定端口（自检、多实例并行）时不回退，避免连错端口。
+  const portCandidates = process.env.FIGMA_BRIDGE_PORT
+    ? [PORT]
+    : Array.from({ length: 10 }, (_, index) => PORT + index)
+  await bridge.start({ portCandidates })
   log(`bridge listening on 127.0.0.1:${bridge.port}`)
+  if (bridge.port !== PORT) log(`端口 ${PORT} 被占用，已改用 ${bridge.port}；伴生插件需要重新导入才能连上`)
 } catch (error) {
-  bridgeError = error.code === 'EADDRINUSE' ? `端口 ${PORT} 已被占用（可能另一个 Figma 桥已在运行）` : String(error.message || error)
+  bridgeError = error.code === 'EADDRINUSE' ? `端口 ${PORT}–${PORT + 9} 均被占用（可能另一个 Figma 桥已在运行）` : String(error.message || error)
   log('bridge failed:', bridgeError)
 }
 
 function pickDocument() {
   if (!bridge) throw new Error(`Figma 桥未启动：${bridgeError}`)
   const docs = bridge.list()
-  if (!docs.length) throw new Error('没有已连接的 Figma 文档。请在 Figma 桌面端运行「WorkBuddy Figma」插件并保持窗口打开。')
+  if (!docs.length) throw new Error('没有已连接的 Figma 文档。请在 Figma 桌面端运行「workbuddy-figma」插件并保持窗口打开。')
   if (selectedId) {
     const found = docs.find((d) => d.connectionId === selectedId)
     if (found) return found
@@ -107,7 +118,7 @@ const META_TOOLS = [
         workspace: WORKSPACE,
         next: bridge?.list()?.length
           ? '文档已连接，可以直接下指令。'
-          : `在 Figma 桌面端 Plugins → Development → Import plugin from manifest… 导入 ${companion.manifest}，然后在目标文件运行「WorkBuddy Figma」。`,
+          : `在 Figma 桌面端 Plugins → Development → Import plugin from manifest… 导入 ${companion.manifest}，然后在目标文件运行「workbuddy-figma」。`,
       })
     },
   },
@@ -121,7 +132,7 @@ const META_TOOLS = [
         ...companion,
         instructions:
           'Figma 桌面端 → Plugins → Development → Import plugin from manifest… → 选中上面这个 manifest.json。' +
-          '之后打开任意设计文件，运行「WorkBuddy Figma」，保持插件窗口打开即可自动连接。此目录含本机凭证，不要分享。',
+          '之后打开任意设计文件，运行「workbuddy-figma」，保持插件窗口打开即可自动连接。此目录含本机凭证，不要分享。',
       })
     },
   },
@@ -209,7 +220,7 @@ async function handle(message) {
     return reply(id, {
       protocolVersion: params?.protocolVersion || '2024-11-05',
       capabilities: { tools: { listChanged: false } },
-      serverInfo: { name: 'figma-bridge', version: VERSION },
+      serverInfo: { name: 'workbuddy-figma', version: VERSION },
       instructions:
         '这是通过本地桥接直接读写 Figma 画布的工具集。开始前先调用 figma_status 确认连接；' +
         '修改类操作优先用 use_figma 直接执行 Figma Plugin API 脚本，读类操作可用 get_metadata / get_screenshot / get_design_context。',

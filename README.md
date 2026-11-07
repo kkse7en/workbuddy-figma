@@ -1,4 +1,4 @@
-# WorkBuddy Figma
+# workbuddy-figma
 
 **让 WorkBuddy 直接读写你的 Figma 画布。**
 
@@ -40,7 +40,7 @@ graph LR
 三句话：
 
 1. WorkBuddy 启动时拉起 `server.mjs`，它是一个标准 MCP server，对外暴露 21 个工具。
-2. `server.mjs` 在 `127.0.0.1:3055` 上开一个小 HTTP 服务，等 Figma 插件来连。
+2. `server.mjs` 在 `127.0.0.1:3055` 上开一个小 HTTP 服务，等 Figma 插件来连（3055 被占用会自动顺延，端口一致地写进插件里）。
 3. 你在 Figma 里运行一次插件，两边用一对本机随机 token 配对，之后就一直通着。
 
 配对 token 是安装时现场生成的 32 字节随机数，只存在你本机，`install.mjs` 会把它注入到
@@ -59,7 +59,7 @@ graph LR
 ### 一键安装
 
 ```bash
-git clone https://github.com/jayk067123-max/workbuddy-figma.git
+git clone https://github.com/kkse7en/workbuddy-figma.git
 cd workbuddy-figma
 node install.mjs
 ```
@@ -102,7 +102,7 @@ Plugins → Development → Import plugin from manifest…
 ~/.workbuddy/workbuddy-figma/companion/manifest.json
 ```
 
-然后在**目标设计文件**里运行 `Plugins → Development → WorkBuddy Figma`。
+然后在**目标设计文件**里运行 `Plugins → Development → workbuddy-figma`。
 会弹出一个窄条小窗口，**留着别关** —— 它一关，连接就断。
 
 ### 验证
@@ -172,7 +172,46 @@ node selftest.mjs
 
 ---
 
+## 连接稳定性
+
+长轮询桥最怕的不是慢，是「看起来连上了但下一次就没反应」。v1.1 修掉了五个会真实造成这种症状的点：
+
+| 症状 | 原因 | 处理 |
+|---|---|---|
+| 连着连着报 `Failed to fetch` | Node 默认 `keepAliveTimeout` 只有 5s，会在两次 18s 轮询之间关掉空闲连接，Figma 的 fetch 复用到死 socket | 保活提到 65s，headers 70s 同步放宽 |
+| 一次网络抖动就永久卡住 | 旧 poll 未回收时新 poll 直接返回 409，插件端断不开 | 新 poll 接管旧 poll（旧的以 `idle` 结束），不再 409 |
+| 操作成功却被判「结果未知」 | 结果回传请求本身超时，重试被当成重复操作 | `/result` 幂等，重复回传返回 `accepted` |
+| 同一个文件重开插件后一直超时 | 僵尸连接留在列表里，工具挑到了那条等不到响应的 | 新连接清掉同 `fileKey` 且在 30s 内无活动的旧连接 |
+| 跑过一次自检后插件突然 401 | 自检和日常共用状态目录，把插件的端口/token 覆写了 | 自检改用独立状态目录（`WORKBUDDY_FIGMA_STATE` 可覆盖） |
+
+另外客户端退避改成了 300ms 起、最多 5s（原来 1s→10s，抖动一次像断了半分钟），
+401 会先用当前密钥自动复验一次再报「配对失效」，
+执行中断后的按钮也从「请重新打开插件」改成了可点的「恢复连接」。
+
+---
+
 ## 常见问题
+
+### 插件一直是「连接中 / 等待桥启动」
+
+按顺序看：
+
+1. **插件是不是旧目录那条？** `Plugins → Development` 里如果出现 `[DEPRECATED]` 前缀的条目，
+   那是历史残留，token 对不上，点了也连不上。用不带前缀的 `workbuddy-figma`。
+2. **端口对不对**：插件的端口是安装时写死的。跑一下 `node install.mjs` 重新生成，
+   再重新导入一次，保证插件和桥指向同一个端口。
+3. **桥在不在跑**：WorkBuddy 重启后才会拉起 `server.mjs`。
+
+### 报「配对已失效」
+
+插件里的 token 和桥的 token 不一致。基本只有一个原因：**你运行的不是最新生成的那份插件**，
+或者状态目录被重新初始化过。
+
+```bash
+node install.mjs
+```
+
+然后用它打印的 `manifest.json` 重新导入一次。旧条目可以在 `Plugins → Manage plugins` 里删掉。
 
 ### Figma 报「manifest.json — 文件名无效」
 
@@ -203,14 +242,23 @@ await page.loadAsync()          // 或者 await figma.loadAllPagesAsync()
 
 ### 报端口 3055 被占用
 
-说明已经有一个桥在跑了（可能另一个 WorkBuddy 窗口，或者原来的 DSH 插件）。
+`install.mjs` 会自动往后找可用端口（3055→3064），并把同一个端口写进插件和 MCP 配置，不需要你手动改。
+如果十个端口全被占，才需要显式指定：
 
 ```bash
-# 看是谁占的
+node install.mjs --port 3080
+```
+
+注意：**换端口后必须重新导入插件**，端口是写死在插件里的。
+
+想看是谁占着：
+
+```bash
 netstat -ano | findstr :3055
 ```
 
-换端口重装：`node install.mjs --port 3060`，然后重新导入插件（端口写在插件里了）。
+有时候 `netstat` 看不到监听、但绑定依然失败 —— 那是 Windows 的保留端口段或被杀进程留下的半关闭
+socket，重启系统或直接换端口都能绕开。
 
 ### WorkBuddy 里看不到 figma 工具
 
@@ -219,8 +267,8 @@ netstat -ano | findstr :3055
 
 ### 插件显示「已连接」但没反应
 
-关掉多余的插件窗口。同一个文件开两个插件会产生两条同名连接，互相抢任务。
-（新版本会自动选最近的那条，但最好还是只留一个。）
+先关掉多余的插件窗口。同一个文件开两个插件会产生两条连接，虽然新版会自动挑最近的那条并清理
+30s 内无活动的僵尸连接，但保持只有一个窗口最省事。
 
 ---
 
@@ -253,6 +301,19 @@ workbuddy-figma/
 
 ---
 
+## 与上游的关系
+
+本项目基于 [DSH-to-Figma](https://github.com/Duoasa/DSH-to-Figma)（MIT，© 2026 Duoasa）。
+
+复用了它的桥接协议、工具定义、素材处理和 Figma 伴生插件资源；
+自己重写的是 MCP 服务端层（上游绑定了 DeepSeek Harness 的插件运行时，无法直接用于
+WorkBuddy）、一键安装、端到端自检，以及针对 WorkBuddy 的适配。
+
+上游项目的版权声明保留在 [LICENSE](LICENSE) 里。
+
+---
+
 ## License
 
-[MIT](LICENSE) © 2026 jayk067123-max
+[MIT](LICENSE) © 2026 kkse7en
+基于 [DSH-to-Figma](https://github.com/Duoasa/DSH-to-Figma) © 2026 Duoasa（MIT）

@@ -11,14 +11,16 @@
  */
 import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { homedir } from 'node:os'
+import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { ensureToken } from './lib/companion.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const PORT = Number(process.env.SELFTEST_PORT || 3056)
-const TOKEN = await ensureToken(join(homedir(), '.workbuddy', 'workbuddy-figma'))
+// 自检必须用自己的状态目录，否则会覆写用户正在用的已配对插件（端口、token 全变）。
+const STATE = join(tmpdir(), 'workbuddy-figma-selftest')
+const TOKEN = await ensureToken(STATE)
 const BASE = `http://127.0.0.1:${PORT}`
 const HEADERS = {
   authorization: `Bearer ${TOKEN}`,
@@ -89,7 +91,7 @@ async function fakePlugin() {
 
 const server = spawn(process.execPath, [join(HERE, 'server.mjs')], {
   cwd: HERE,
-  env: { ...process.env, FIGMA_BRIDGE_PORT: String(PORT), CODEBUDDY_PROJECT_DIR: HERE },
+  env: { ...process.env, FIGMA_BRIDGE_PORT: String(PORT), WORKBUDDY_FIGMA_STATE: STATE, CODEBUDDY_PROJECT_DIR: HERE },
   stdio: ['pipe', 'pipe', 'pipe'],
 })
 server.stderr.on('data', () => {}) // 服务端日志不参与断言

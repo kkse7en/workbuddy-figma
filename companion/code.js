@@ -442,10 +442,10 @@
           value={scope:args.pageId?'specified-page components, local-file variables and styles':'current-page components, local-file variables and styles',components:cp.items.map(n=>this.snapshot(n,0)),variables:vp.items.map(v=>({id:v.id,name:v.name,resolvedType:v.resolvedType})),styles:sp.items.map(s=>({id:s.id,key:s.key,name:s.name,type:s.type})),...(active?{pagination:{components:cp.pagination,variables:vp.pagination,styles:sp.pagination}}:{})};break
         }
         case 'get_component_context': { const n = await this.node(args.nodeId); if (!['COMPONENT','COMPONENT_SET','INSTANCE'].includes(n.type)) throw new Error('Expected a component, component set, or instance'); value = this.snapshot(n,depth); break }
-        case 'get_local_component_links': { const n=await this.node(args.nodeId); value = JSON.parse(n.getPluginData('dsh-code-links') || '[]'); break }
+        case 'get_local_component_links': { const n=await this.node(args.nodeId); value = JSON.parse(n.getPluginData('workbuddy-figma-code-links') || '[]'); break }
         case 'set_local_component_links': {
           if (!Array.isArray(args.links) || args.links.length > 100) throw new Error('Expected at most 100 component links')
-          const n=await this.node(args.nodeId); n.setPluginData('dsh-code-links',JSON.stringify(args.links)); value={id:n.id,links:args.links,scope:'DSH plugin data; not published Figma Code Connect'}; f.commitUndo(); break
+          const n=await this.node(args.nodeId); n.setPluginData('workbuddy-figma-code-links',JSON.stringify(args.links)); value={id:n.id,links:args.links,scope:'workbuddy-figma plugin data; not published Figma Code Connect'}; f.commitUndo(); break
         }
         case 'get_motion_context': { const n=await this.node(args.nodeId); value={id:n.id,reactions:jsonValue(n.reactions) || [], motion:jsonValue(n.motion) ?? null,scope:'Public Plugin API only; cloud timeline conversion is not emulated'}; break }
         case 'download_assets': {
@@ -523,7 +523,7 @@ figma.ui.onmessage = async message => {
     return
   }
   if (message.type === 'describe') {
-    figma.ui.postMessage({ type: 'document', name: figma.root.name, editorType: figma.editorType, fileKey: figma.fileKey || null, featureVersion: 3, companionVersion: globalThis.DSH_FIGMA_BOOTSTRAP?.version || null, connection: globalThis.DSH_FIGMA_BOOTSTRAP || null })
+    figma.ui.postMessage({ type: 'document', name: figma.root.name, editorType: figma.editorType, fileKey: figma.fileKey || null, featureVersion: 3, companionVersion: globalThis.WORKBUDDY_FIGMA_BOOTSTRAP?.version || null, connection: globalThis.WORKBUDDY_FIGMA_BOOTSTRAP || null })
     return
   }
   if (message.type !== 'execute') return
